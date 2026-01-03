@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>暗黑宿命 - 答案之书 (赛博增强版)</title>
+    <!-- 引入 Google Fonts 增加科幻神秘感 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Zen+Dots&display=swap" rel="stylesheet">
+    
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Orbitron', sans-serif; }
+        
+        /* CRT 扫描线滤镜效果 */
+        body::after {
+            content: " ";
+            display: block;
+            position: absolute;
+            top: 0; left: 0; bottom: 0; right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            z-index: 100;
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+        }
+
+        #ui-layer { position: absolute; top: 20px; left: 20px; color: rgba(200,200,200,0.8); z-index: 10; pointer-events: none; user-select: none; text-shadow: none; }
+        .instruction { font-size: 14px; line-height: 1.8; color: #888; border-left: 2px solid #444; padding-left: 15px; }
+        .key { color: #4ff; font-weight: bold; }
+        #status-text { color: #ccc; letter-spacing: 1px; font-weight: bold; }
+
+        @keyframes pulse { 0% { opacity: 0.7; } 50% { opacity: 1; } 100% { opacity: 0.7; } }
+
+        /* 隐藏视频但保持功能运作 */
+        #video-container { position: absolute; top: -1000px; left: -1000px; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+
+        #loader { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #4ff; font-size: 14px; letter-spacing: 4px; text-transform: uppercase; text-shadow: 0 0 10px #0ff;}
+    </style>
+    
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+</head>
+<body>
+
+    <div id="loader">系统初始化...</div>
+
+    <div id="ui-layer">
+        <div class="instruction">
+            <p> <span class="key">导航</span> 右手悬停移动</p>
+            <p> <span class="key">启动</span> 握紧拳头蓄力</p>
+            <p> <span class="key">重置</span> 揭示答案后张开手掌</p>
+            <p>状态: <span id="status-text">等待上行链路...</span></p>
+        </div>
+    </div>
+
+    <div id="video-container"><video id="input-video"></video></div>
+    
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        const CONF = {
+            // *** 修改：增加卡牌数量 ***
+            cardCount: 100,
+            cardSpacing: 3.2, 
+            chargeTimeNeed: 50, 
+            colors: { bg: 0x020205, cursor: 0x44ffff, cursorActive: 0xffffff } 
+        };
+
+        const input = { x: 0.5, y: 0.5, isFist: false, isDetected: false };
+        let scrollTarget = 0, scrollCurrent = 0, pinchTimer = 0, activeCardIndex = 0, explosionParticles; 
+        const clock = new THREE.Clock(); 
+
+        // --- Scene & Bloom ---
+        const scene = new THREE.Scene();
+
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 0, 11);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: false, stencil: false, depth: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(CONF.colors.bg);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); 
+        document.body.appendChild(renderer.domElement);
+
+        const renderScene = new RenderPass(scene, camera);
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.threshold = 0.85; 
+        bloomPass.strength = 0.8;   
+        bloomPass.radius = 0.5;     
+
+        const composer = new EffectComposer(renderer);
+        composer.addPass(renderScene);
+        composer.addPass(bloomPass);
+
+        // --- Visuals ---
+        function createCosmosBackground() {
+            const cvs = document.createElement('canvas');
+            cvs.width = 256; cvs.height = 256;
+            const ctx = cvs.getContext('2d');
+
+            ctx.fillStyle = '#0d0d25';
+            ctx.fillRect(0, 0, 256, 256);
+
+            for (let i = 0; i < 15; i++) {
+                const x = Math.random() * 256;
+                const y = Math.random() * 256;
+                const r1 = Math.random() * 5;
+                const r2 = Math.random() * 80 + 40;
+                
+                const grad = ctx.createRadialGradient(x, y, r1, x, y, r2);
+                const r = Math.floor(100 + Math.random() * 100);
+                const g = Math.floor(120 + Math.random() * 80);
+                const b = 255;
+                const alpha = 0.1 + Math.random() * 0.1;
+                grad.addColorStop(0, `rgba(${r},${g},${b},${alpha})`);
+                grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, 256, 256);
+            }
+
+            const tex = new THREE.CanvasTexture(cvs);
+            tex.wrapS = THREE.RepeatWrapping;
+            tex.wrapT = THREE.RepeatWrapping;
+            tex.repeat.set(4, 4);
+
+            const geo = new THREE.PlaneGeometry(200, 200);
+            const mat = new THREE.MeshBasicMaterial({ map: tex });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.z = -30;
+            scene.add(mesh);
+        }
+        createCosmosBackground();
+
+        const cursorGeo = new THREE.RingGeometry(0.08, 0.1, 32);
+        const cursorMat = new THREE.MeshBasicMaterial({ color: CONF.colors.cursor, transparent: true, opacity: 0.5, depthTest: false });
+        const cursor = new THREE.Mesh(cursorGeo, cursorMat);
+        cursor.position.z = 5;
+        scene.add(cursor);
+
+        const chargeGeo = new THREE.RingGeometry(0.12, 0.16, 64, 1, 0, 0);
+        const chargeMat = new THREE.MeshBasicMaterial({ color: 0xff0044, side: THREE.DoubleSide, transparent: true, opacity: 0.9, depthTest: false, blending: THREE.AdditiveBlending });
+        const chargeRing = new THREE.Mesh(chargeGeo, chargeMat);
+        chargeRing.position.z = 5; chargeRing.visible = false;
+        scene.add(chargeRing);
+        
+        const pGeo = new THREE.BufferGeometry();
+        const pCount = 5000;
+        const pPos = new Float32Array(pCount * 3);
+        const pSpeeds = new Float32Array(pCount);
+        const pColors = new Float32Array(pCount * 3);
+        const pPhases = new Float32Array(pCount);
+
+        const color = new THREE.Color();
+
+        for(let i=0; i<pCount; i++) {
+            pPos[i*3] = (Math.random()-0.5)*100;
+            pPos[i*3+1] = (Math.random()-0.5)*80;
+            pPos[i*3+2] = (Math.random()-0.5)*60 - 15;
+            pSpeeds[i] = Math.random() * 0.2 + 0.1;
+            pPhases[i] = Math.random() * Math.PI * 2;
+
+            color.setHSL(0.6 + Math.random() * 0.1, 0.8, 0.8 + Math.random() * 0.1);
+            pColors[i*3] = color.r;
+            pColors[i*3+1] = color.g;
+            pColors[i*3+2] = color.b;
+        }
+        pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+        pGeo.setAttribute('color', new THREE.BufferAttribute(pColors, 3));
+        pGeo.userData.phases = pPhases;
+        pGeo.userData.speeds = pSpeeds;
+
+        const pMat = new THREE.PointsMaterial({ 
+            size: 0.08, 
+            transparent: true, 
+            opacity: 0.6, 
+            sizeAttenuation: true, 
+            vertexColors: true,
+            blending: THREE.AdditiveBlending 
+        });
+        const particles = new THREE.Points(pGeo, pMat);
+        scene.add(particles);
+
+        function initExplosionSystem() {
+            const count = 1500; 
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(count * 3);
+            const velocities = new Float32Array(count * 3); 
+            
+            for (let i = 0; i < count; i++) {
+                const speed = Math.random() * 0.3 + 0.05;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(Math.random() * 2 - 1);
+                velocities[i*3] = speed * Math.sin(phi) * Math.cos(theta);
+                velocities[i*3+1] = speed * Math.sin(phi) * Math.sin(theta);
+                velocities[i*3+2] = speed * Math.cos(phi);
+            }
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions.fill(0), 3));
+            geometry.setAttribute('velocity', new THREE.BufferAttribute(velocities, 3));
+
+            const material = new THREE.PointsMaterial({ size: 0.05, color: 0x8888ff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending });
+            explosionParticles = new THREE.Points(geometry, material);
+            explosionParticles.userData.isActive = false;
+            explosionParticles.userData.initialVelocities = velocities.slice();
+            scene.add(explosionParticles);
+        }
+        initExplosionSystem();
+
+        function createTitleMesh() {
+            const cvs = document.createElement('canvas');
+            cvs.width = 1024; cvs.height = 256;
+            const ctx = cvs.getContext('2d');
+            
+            document.fonts.ready.then(() => {
+                ctx.fillStyle = "#dddddd"; 
+                ctx.font = "140px 'Zen Dots', cursive";
+                ctx.textAlign = "center"; 
+                ctx.textBaseline = "middle";
+                ctx.fillText("答案之书", 512, 128);
+                const tex = new THREE.CanvasTexture(cvs);
+                const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.9 });
+                const geom = new THREE.PlaneGeometry(8, 2); 
+                const mesh = new THREE.Mesh(geom, mat);
+                mesh.position.set(0, 3.8, -2); 
+                scene.add(mesh);
+            });
+        }
+        createTitleMesh();
+
+        // --- Cards ---
+        // *** 修改：扩充答案到100个 ***
+        const answers = [
+            "静 待 时 机", "绝 对 不 可", "放 手 一 搏", "命 定 之 数", "需 要 耐 心", 
+            "直 觉 指 引", "重 建 秩 序", "虚 假 之 象", "贵 人 将 至", "保 持 缄 默", 
+            "即 刻 启 程", "再 试 一 次", "勇 敢 前 行", "三 思 后 行", "顺 其 自 然", 
+            "未 来 可 期", "柳 暗 花 明", "时 机 未 到", "倾 听 内 心", "必 有 回 响", 
+            "关 注 细 节", "放 下 过 去", "接 受 现 实", "寻 求 帮 助", "这 是 祝 福", 
+            "换 个 角 度", "结 果 积 极", "充 满 希 望", "不 要 怀 疑", "坚 持 信 念", 
+            "灵 感 涌 现", "需 要 平 衡", "专 注 目 标", "分 享 喜 悦", "谨 慎 行 事", 
+            "意 外 之 喜", "保 持 开 放", "控 制 情 绪", "真 相 大 白", "和 平 解 决", 
+            "展 现 创 意", "顺 应 潮 流", "承 担 风 险", "付 出 努 力", "奖 励 自 己", 
+            "庆 祝 成 功", "重 新 评 估", "追 随 梦 想", "积 极 思 考", "毫 无 疑 问", 
+            "结 果 未 知", "暂 停 一 下", "表 达 感 激", "向 前 迈 进", "选 择 权 在 你", 
+            "这 很 重 要", "依 赖 他 人", "独 立 自 主", "充 满 挑 战", "无 需 担 忧", 
+            "问 题 将 解 决", "是 的", "不", "也 许", "遵 循 规 则", 
+            "打 破 常 规", "让 时 间 证 明", "专 注 于 家 庭", "关 注 财 务", "健 康 第 一", 
+            "一 段 旅 程", "新 的 开 始", "完 美 时 机", "大 胆 尝 试", "放 松 一 下", 
+            "机 会 来 临", "必 须 放 弃", "寻 找 乐 趣", "承 担 责 任", "相 信 奇 迹", 
+            "局 势 复 杂", "简 化 问 题", "增 强 信 心", "展 现 你 的 力 量", "保 持 谦 逊", 
+            "学 会 拒 绝", "不 要 妥 协", "沟 通 是 关 键", "等 待 明 确 信 号", "别 害 怕", 
+            "这 是 个 考 验", "释 放 压 力", "答 案 在 心 中", "值 得 等 待", "相 信 自 己", 
+            "另 有 蹊 径", "坚 定 不 移", "寻 求 和 谐", "好 运 将 至", "保 持 乐 观"
+        ];
+
+        function createCardMap(text, isFront) {
+            const cvs = document.createElement('canvas');
+            cvs.width = 512; cvs.height = 768;
+            const ctx = cvs.getContext('2d');
+            const w = 512, h = 768;
+
+            const grad = ctx.createLinearGradient(0, 0, w, h);
+            grad.addColorStop(0, isFront ? '#222' : '#151515');
+            grad.addColorStop(1, '#000');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0,0,w,h);
+
+            for (let i = 0; i < 4000; i++) {
+                ctx.fillStyle = `rgba(100,100,120,${Math.random() * 0.08})`;
+                ctx.fillRect(Math.random()*w, Math.random()*h, 2, 2);
+            }
+
+            ctx.shadowBlur = 20;
+            // *** 修改：改变卡背边框颜色 ***
+            ctx.shadowColor = isFront ? "#44aaff" : "#cccccc"; // 背面辉光改为银白色
+            ctx.strokeStyle = isFront ? '#446688' : '#ffffff'; // 背面边框改为纯白色
+            ctx.lineWidth = 8;
+            ctx.strokeRect(20,20,w-40,h-40);
+            
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(35,35,w-70,h-70);
+
+            if (isFront) {
+                ctx.shadowBlur = 0; 
+                ctx.fillStyle = "#bbbbbb"; 
+                ctx.font = "bold 60px 'Orbitron', monospace";
+                ctx.textAlign = "center"; ctx.textBaseline = "middle";
+                ctx.fillText(text.replace(/\s+/g, ''), w/2, h/2);
+                ctx.strokeStyle = "#446688"; ctx.lineWidth = 3; 
+                ctx.beginPath(); ctx.moveTo(100, h/2+50); ctx.lineTo(w-100, h/2+50); ctx.stroke();
+            } else {
+                ctx.translate(w/2, h/2);
+                ctx.shadowBlur = 30;
+                ctx.shadowColor = "#55aaff";
+
+                const primaryColor = "#cccccc";
+                ctx.strokeStyle = primaryColor;
+                ctx.fillStyle = primaryColor;
+
+                function drawStar(x, y, radius, points) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, y + radius);
+                    for (let i = 1; i < points * 2; i++) {
+                        const angle = i * Math.PI / points;
+                        const r = (i % 2 === 0) ? radius : radius / 2.5;
+                        ctx.lineTo(x + r * Math.sin(angle), y + r * Math.cos(angle));
+                    }
+                    ctx.closePath();
+                    ctx.fill();
+                }
+                
+                ctx.globalAlpha = 0.8;
+                drawStar(0, -280, 15, 5);
+                drawStar(0, 280, 15, 5);
+                drawStar(-160, -310, 10, 5);
+                drawStar(160, -310, 10, 5);
+                drawStar(-160, 310, 10, 5);
+                drawStar(160, 310, 10, 5);
+                ctx.globalAlpha = 1.0;
+
+                function drawCrescent(yOffset, isReversed) {
+                    ctx.beginPath();
+                    ctx.arc(0, yOffset, 100, 0, Math.PI * 2, false);
+                    ctx.fill();
+                    ctx.globalCompositeOperation = 'destination-out';
+                    ctx.beginPath();
+                    const cutoutX = isReversed ? -40 : 40;
+                    ctx.arc(cutoutX, yOffset, 90, 0, Math.PI * 2, false);
+                    ctx.fill();
+                    ctx.globalCompositeOperation = 'source-over';
+                }
+
+                drawCrescent(-160, false);
+                drawCrescent(160, true);
+
+                ctx.lineWidth = 2;
+                ctx.globalAlpha = 0.5;
+                ctx.beginPath();
+                ctx.arc(0,0, 220, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.globalAlpha = 1.0;
+            }
+            const tex = new THREE.CanvasTexture(cvs);
+            tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+            return tex;
+        }
+
+        const cards = [];
+        const cardGroup = new THREE.Group();
+        scene.add(cardGroup);
+        const cardGeo = new THREE.PlaneGeometry(2.4, 3.6);
+
+        const finalTextMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 });
+        const finalTextPlane = new THREE.Mesh(new THREE.PlaneGeometry(4, 6), finalTextMat);
+        finalTextPlane.position.z = 8; finalTextPlane.visible = false;
+        scene.add(finalTextPlane);
+        
+        for (let i = 0; i < CONF.cardCount; i++) {
+            const matFront = new THREE.MeshBasicMaterial({ map: createCardMap(answers[i], true) });
+            const matBack = new THREE.MeshBasicMaterial({ map: createCardMap("", false) });
+            const cardObj = new THREE.Group();
+            const meshFront = new THREE.Mesh(cardGeo, matFront);
+            meshFront.rotation.y = Math.PI; meshFront.position.z = -0.01;
+            const meshBack = new THREE.Mesh(cardGeo, matBack);
+            cardObj.add(meshFront, meshBack);
+            cardObj.userData = { id: i, baseX: i * CONF.cardSpacing };
+            cardGroup.add(cardObj);
+            cards.push(cardObj);
+        }
+
+        document.getElementById('loader').style.display = 'none';
+
+        // --- Logic ---
+        let gameState = 'IDLE'; 
+
+        function updateLogic() {
+            if (gameState === 'RESETTING') return;
+            const time = clock.getElapsedTime();
+
+            const vec = new THREE.Vector3((input.x * 2) - 1, -(input.y * 2) + 1, 0.5);
+            vec.unproject(camera);
+            const dir = vec.sub(camera.position).normalize();
+            const distance = (5 - camera.position.z) / dir.z;
+            const pos = camera.position.clone().add(dir.multiplyScalar(distance));
+            
+            cursor.position.lerp(pos, 0.15); 
+            chargeRing.position.copy(cursor.position);
+            cursor.rotation.z -= 0.05;
+            cursor.scale.setScalar(1 + Math.sin(time * 3) * 0.05);
+
+            if (gameState === 'REVEALED') { updateExplosion(); return; }
+
+            const speed = (input.x - 0.5) * 0.7;
+            
+            if (Math.abs(speed) > 0.06 && !input.isFist) {
+                scrollTarget -= speed;
+            } else {
+                const nearestIdx = Math.round(-scrollTarget / CONF.cardSpacing);
+                scrollTarget += (-nearestIdx * CONF.cardSpacing - scrollTarget) * 0.08;
+            }
+
+            scrollCurrent += (scrollTarget - scrollCurrent) * 0.1;
+
+            const totalW = CONF.cardCount * CONF.cardSpacing;
+            let closestDist = Infinity, closestIndex = -1;
+            
+            cards.forEach((c, idx) => {
+                let realX = (c.userData.baseX + scrollCurrent) % totalW;
+                if (realX > totalW / 2) realX -= totalW;
+                if (realX < -totalW / 2) realX += totalW;
+
+                c.position.x = realX;
+                c.position.y = Math.sin(time * 2 + idx) * 0.05 - 0.5;
+                const distToCenter = Math.abs(realX);
+                const focus = Math.exp(-Math.pow(distToCenter * 0.5, 2));
+                c.scale.setScalar(1 + focus * 0.4);
+                c.position.z = focus * 2.0; 
+                c.rotation.y = -realX * 0.2 + Math.sin(time * 0.5 + idx) * 0.02;
+                const opacity = 1 - Math.min(distToCenter / (CONF.cardSpacing * 2.0), 0.9);
+                c.children.forEach(mesh => mesh.material.opacity = opacity);
+                
+                if (distToCenter < closestDist) { closestDist = distToCenter; closestIndex = idx; }
+            });
+            activeCardIndex = closestIndex;
+
+            const statusEl = document.getElementById('status-text');
+            if (input.isFist && closestIndex !== -1 && Math.abs(cards[closestIndex].position.x) < 0.6) {
+                pinchTimer++; 
+                gameState = 'CHARGING';
+                chargeRing.visible = true;
+                
+                const progress = Math.min(pinchTimer / CONF.chargeTimeNeed, 1);
+                
+                chargeRing.geometry.dispose();
+                chargeRing.geometry = new THREE.RingGeometry(0.12, 0.16, 64, 1, Math.PI/2, progress * Math.PI * 2);
+                
+                const shake = progress * 0.15;
+                cards[activeCardIndex].position.x += (Math.random()-0.5) * shake;
+                cards[activeCardIndex].position.y += (Math.random()-0.5) * shake;
+                
+                chargeRing.material.color.setHSL(0.9 - progress * 0.4, 1, 0.5);
+                statusEl.innerText = `同步中... ${Math.floor(progress*100)}%`;
+                statusEl.style.color = "#ff3333";
+
+                if (pinchTimer >= CONF.chargeTimeNeed) revealAnswer(cards[activeCardIndex]);
+            } else {
+                pinchTimer = 0; if (gameState === 'CHARGING') gameState = 'IDLE';
+                chargeRing.visible = false;
+                statusEl.innerText = input.isDetected ? "连接成功 - 握拳以选择" : "正在搜索信号...";
+                statusEl.style.color = "#fff";
+            }
+        }
+
+        function updateExplosion() {
+            if (!explosionParticles.userData.isActive) return;
+            const positions = explosionParticles.geometry.attributes.position.array;
+            const velocities = explosionParticles.geometry.attributes.velocity.array;
+            
+            for (let i = 0; i < positions.length / 3; i++) {
+                positions[i*3] += velocities[i*3];
+                positions[i*3+1] += velocities[i*3+1];
+                positions[i*3+2] += velocities[i*3+2];
+                velocities[i*3] *= 0.96; 
+                velocities[i*3+1] *= 0.96;
+                velocities[i*3+2] *= 0.96;
+            }
+            explosionParticles.geometry.attributes.position.needsUpdate = true;
+            explosionParticles.rotation.y += 0.002;
+        }
+
+        function revealAnswer(targetCard) {
+            gameState = 'REVEALED';
+            document.getElementById('status-text').innerText = "命运已定 - 张开手掌重新开始";
+            gsap.to('#ui-layer', { opacity: 0.8, duration: 1, delay: 1.5 });
+            cursor.visible = false; chargeRing.visible = false;
+
+            gsap.to(bloomPass, { strength: 4.0, radius: 1.5, duration: 0.1, yoyo: true, repeat: 1, ease: "power2.inOut" });
+            gsap.to(bloomPass, { strength: 1.5, duration: 2, delay: 0.3 }); 
+
+            cards.forEach(c => {
+                if (c !== targetCard) {
+                    gsap.to(c.position, { y: -25, duration: 1.5, ease: "power2.in" });
+                    gsap.to(c.scale, { x: 0, y: 0, duration: 1 });
+                }
+            });
+
+            const tl = gsap.timeline();
+            tl.to(targetCard.position, { x: 0, y: 0, z: 7, duration: 1.2, ease: "power3.out" })
+              .to(targetCard.rotation, { y: Math.PI, duration: 1.0, ease: "back.out(1.2)" }, "<") 
+              .to(targetCard.scale, { x: 1.5, y: 1.5, duration: 1.2 }, "<");
+            
+            tl.call(() => {
+                finalTextMat.map = targetCard.children[0].material.map;
+                finalTextPlane.visible = true; 
+                finalTextPlane.position.copy(targetCard.position); 
+                explosionParticles.position.copy(targetCard.position);
+                explosionParticles.userData.isActive = true;
+                
+                gsap.to(explosionParticles.material, { opacity: 0.8, duration: 0.1 });
+                gsap.to(explosionParticles.material, { opacity: 0, duration: 3, delay: 0.5 });
+                
+                gsap.to(targetCard.children, { duration: 0.2, onUpdate: function() {
+                    this.targets().forEach(t => t.material.opacity = 1 - this.progress());
+                }});
+                gsap.to(finalTextMat, { opacity: 1, duration: 0.5 });
+            }, null, "-=0.4"); 
+        }
+
+        function resetExperience() {
+            if (gameState !== 'REVEALED') return;
+            gameState = 'RESETTING';
+            document.getElementById('status-text').innerText = "连接成功 - 握拳以选择";
+            gsap.to('#ui-layer', { opacity: 1, duration: 1 });
+            cursor.visible = true;
+            finalTextPlane.visible = false;
+            gsap.to(finalTextMat, { opacity: 0, duration: 0.5 });
+            
+            explosionParticles.userData.isActive = false;
+            gsap.to(explosionParticles.material, { opacity: 0, duration: 0.5 });
+            
+            const positions = explosionParticles.geometry.attributes.position;
+            const velocities = explosionParticles.geometry.attributes.velocity;
+            
+            positions.array.fill(0);
+            velocities.array.set(explosionParticles.userData.initialVelocities);
+            
+            positions.needsUpdate = true;
+            velocities.needsUpdate = true;
+
+            scrollTarget = 0; scrollCurrent = 0; pinchTimer = 0;
+
+            cards.forEach(c => {
+                gsap.killTweensOf(c.position); gsap.killTweensOf(c.scale); gsap.killTweensOf(c.rotation);
+                gsap.to(c.position, { y: 0, z: 0, duration: 1.5, ease: "power3.out" });
+                gsap.to(c.scale, { x: 1, y: 1, z: 1, duration: 1.5, ease: "power3.out" });
+                gsap.to(c.rotation, { y: 0, duration: 1.5, ease: "power3.out" });
+                c.children.forEach(mesh => gsap.to(mesh.material, { opacity: 1, duration: 1.0 }));
+            });
+            setTimeout(() => { gameState = 'IDLE'; }, 1500);
+        }
+
+        window.addEventListener('mousemove', e => {
+            if (!input.isDetected) { input.x = e.clientX / window.innerWidth; input.y = e.clientY / window.innerHeight; }
+        });
+        window.addEventListener('mousedown', () => { if(!input.isDetected) input.isFist = true; });
+        window.addEventListener('mouseup', () => { if(!input.isDetected) input.isFist = false; });
+
+        const videoElement = document.getElementById('input-video');
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        
+        hands.onResults(results => {
+            input.isDetected = false;
+            input.isFist = false;
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                if (gameState === 'REVEALED') {
+                    for (const landmarks of results.multiHandLandmarks) {
+                        const tips = [8, 12, 16, 20];
+                        const pips = [6, 10, 14, 18];
+                        let extendedCount = 0;
+                        for (let k = 0; k < 4; k++) { if (landmarks[tips[k]].y < landmarks[pips[k]].y) extendedCount++; }
+                        if (Math.abs(landmarks[4].x - landmarks[2].x) > 0.04) extendedCount++;
+                        
+                        if (extendedCount >= 4) {
+                            resetExperience();
+                            return;
+                        }
+                    }
+                }
+
+                let rightHandIndex = -1;
+                for (let i = 0; i < results.multiHandedness.length; i++) {
+                    if (results.multiHandedness[i].label === 'Right') {
+                        rightHandIndex = i;
+                        break;
+                    }
+                }
+
+                if (rightHandIndex !== -1) {
+                    input.isDetected = true;
+                    const lm = results.multiHandLandmarks[rightHandIndex];
+                    const i8 = lm[8];
+                    input.x += ((1 - i8.x) - input.x) * 0.5;
+                    input.y += (i8.y - input.y) * 0.5;
+
+                    const tips = [8, 12, 16, 20];
+                    const pips = [6, 10, 14, 18];
+                    let extendedFingers = 0;
+                    for (let k = 0; k < 4; k++) {
+                        if (lm[tips[k]].y < lm[pips[k]].y) extendedFingers++;
+                    }
+                    if (Math.abs(lm[4].x - lm[2].x) > 0.04) extendedFingers++;
+                    
+                    if (extendedFingers <= 1) {
+                        input.isFist = true;
+                    }
+                }
+            }
+        });
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 320, height: 240
+        });
+        cameraUtils.start();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            updateLogic();
+            
+            const time = clock.getElapsedTime();
+            const positions = particles.geometry.attributes.position.array;
+            const phases = particles.geometry.userData.phases;
+            const speeds = particles.geometry.userData.speeds;
+            
+            for(let i=0; i<pCount; i++){
+                positions[i*3+1] += Math.sin(time * speeds[i] + phases[i]) * 0.02;
+            }
+            particles.geometry.attributes.position.needsUpdate = true;
+            particles.rotation.y = time * 0.02;
+
+            composer.render();
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
